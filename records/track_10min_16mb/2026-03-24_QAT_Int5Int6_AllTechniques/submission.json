@@ -1,0 +1,11 @@
+{
+    "author": "AppTalentHub (tsuba)",
+    "github_id": "tsuba",
+    "val_bpb": null,
+    "date": "2026-03-24",
+    "summary": "STE QAT with mixed int5 (MLP) / int6 (attention) during training + all proven techniques: 10L, MLP 3x, SmearGate, BigramHash(10240), OrthoInit, Muon WD=0.04, SWA, sliding eval stride=64, zstd-22",
+    "hardware": "8x NVIDIA H100 80GB SXM",
+    "train_time_seconds": null,
+    "artifact_bytes": null,
+    "notes": "Pending first run on H100s. QAT warmup at step 500, enabling the model to first learn general representations before adapting to quantization constraints."
+}
