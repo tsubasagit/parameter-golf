@@ -255,7 +255,7 @@ def eval_val(
             local = val_tokens[raw_start:raw_end].to(device=device, dtype=torch.int64, non_blocking=True)
             x = local[:-1].reshape(-1, args.train_seq_len)
             y = local[1:].reshape(-1, args.train_seq_len)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16 if _use_bf16 else torch.float16, enabled=True):
                 batch_loss = model(x, y).detach()
             batch_token_count = float(y.numel())
             val_loss_sum += batch_loss.to(torch.float64) * batch_token_count
@@ -766,10 +766,18 @@ def main() -> None:
     torch.backends.cudnn.allow_tf32 = True
     from torch.backends.cuda import enable_cudnn_sdp, enable_flash_sdp, enable_math_sdp, enable_mem_efficient_sdp
 
+    # Auto-detect GPU capability: T4 (7.5) needs float16 + math/mem_efficient SDP
+    _cc = torch.cuda.get_device_capability(device)
+    _use_bf16 = _cc[0] >= 8  # Ampere+ supports bfloat16
     enable_cudnn_sdp(False)
-    enable_flash_sdp(True)
-    enable_mem_efficient_sdp(False)
-    enable_math_sdp(False)
+    if _use_bf16:
+        enable_flash_sdp(True)
+        enable_mem_efficient_sdp(False)
+        enable_math_sdp(False)
+    else:
+        enable_flash_sdp(False)
+        enable_mem_efficient_sdp(True)
+        enable_math_sdp(True)
 
     logfile = None
     if master_process:
@@ -838,7 +846,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
-    ).to(device).bfloat16()
+    ).to(device).to(torch.bfloat16 if _use_bf16 else torch.float16)
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
             module.float()
@@ -947,7 +955,7 @@ def main() -> None:
                 if distributed:
                     model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
                 x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16 if _use_bf16 else torch.float16, enabled=True):
                     warmup_loss = model(x, y)
                 (warmup_loss * grad_scale).backward()
             for opt in optimizers:
@@ -1015,7 +1023,7 @@ def main() -> None:
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
             x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16 if _use_bf16 else torch.float16, enabled=True):
                 loss = model(x, y)
             train_loss += loss.detach()
             (loss * grad_scale).backward()
