@@ -548,12 +548,9 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
         q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
-        if self.num_kv_heads != self.num_heads:
-            rep = self.num_heads // self.num_kv_heads
-            k = k.repeat_interleave(rep, dim=1)
-            v = v.repeat_interleave(rep, dim=1)
         y = F.scaled_dot_product_attention(
             q, k, v, attn_mask=None, is_causal=True,
+            enable_gqa=(self.num_kv_heads != self.num_heads),
         )
         y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
         return self.proj(y)
@@ -777,7 +774,7 @@ def eval_val_sliding(
                 chunk = val_tokens[ws:end + 1].to(dtype=torch.int64, device=device)
                 x_batch[i, :wlen] = chunk[:-1]
                 y_batch[i, :wlen] = chunk[1:]
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16 if _use_bf16 else torch.float16):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits = base_model.forward_logits(x_batch)
             nll = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)).float(),
@@ -849,18 +846,10 @@ def main() -> None:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     from torch.backends.cuda import enable_cudnn_sdp, enable_flash_sdp, enable_math_sdp, enable_mem_efficient_sdp
-
-    _cc = torch.cuda.get_device_capability(device)
-    _use_bf16 = _cc[0] >= 8
     enable_cudnn_sdp(False)
-    if _use_bf16:
-        enable_flash_sdp(True)
-        enable_mem_efficient_sdp(False)
-        enable_math_sdp(False)
-    else:
-        enable_flash_sdp(False)
-        enable_mem_efficient_sdp(True)
-        enable_math_sdp(True)
+    enable_flash_sdp(True)
+    enable_mem_efficient_sdp(False)
+    enable_math_sdp(False)
 
     logfile = None
     if master_process:
@@ -924,7 +913,7 @@ def main() -> None:
         qk_gain_init=args.qk_gain_init,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
-    ).to(device).to(torch.bfloat16 if _use_bf16 else torch.float16)
+    ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
             module.float()
@@ -1032,7 +1021,7 @@ def main() -> None:
                 if distributed:
                     model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
                 x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16 if _use_bf16 else torch.float16, enabled=True):
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                     warmup_loss = model(x, y)
                 (warmup_loss * grad_scale).backward()
             for opt in optimizers:
@@ -1091,7 +1080,7 @@ def main() -> None:
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
             x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16 if _use_bf16 else torch.float16, enabled=True):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 loss = model(x, y)
             train_loss += loss.detach()
             (loss * grad_scale).backward()
